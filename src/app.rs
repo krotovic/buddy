@@ -15,7 +15,9 @@ use winit::window::{Window, WindowAttributes, WindowId, WindowLevel};
 
 use crate::geometry::{self, Edge, Rect};
 use crate::gpu::{Gpu, WindowSurface};
+use crate::hooks;
 use crate::library::{Kind, Library, TimeOfDay};
+use crate::pending::{self, Pending, Reaction};
 use crate::settings::{Mode, Settings};
 use crate::timeline::{self, Exit};
 use crate::tray::{self, Command, Tray};
@@ -24,6 +26,8 @@ use crate::tray::{self, Command, Tray};
 pub enum UserEvent {
     Menu(String),
     Hotkey(u32),
+    /// From the Claude Code hook server.
+    Hook(pending::Event),
 }
 
 pub struct App {
@@ -42,6 +46,10 @@ pub struct App {
     /// Position along the edge, 0.0–1.0; changes before every peek.
     along: f32,
     rng: u64,
+    /// Pending Claude Code work.
+    pending: Pending,
+    /// Animation to play once the current one has slid away.
+    queued: Option<Kind>,
 }
 
 /// Seconds the cube takes to slide away when a looping animation stops.
@@ -87,6 +95,8 @@ impl App {
             playing: None,
             along: 0.5,
             rng: seed,
+            pending: Pending::default(),
+            queued: None,
         })
     }
 
@@ -148,9 +158,77 @@ impl App {
         }
         if self.settings.mode == Mode::Off {
             self.playing = None;
+            self.queued = None;
+        } else if self.playing.is_none() && self.pending.needs_you() > 0 {
+            // Catch up on what arrived while Off: one animation, the most
+            // important one.
+            self.play(Kind::NeedsYou, false);
         }
         self.reschedule();
         self.request_redraw();
+    }
+
+    fn hooks_installed(&self) -> bool {
+        hooks::claude_settings_path().is_some_and(|p| {
+            hooks::installed(&p, self.settings.hook_port, &self.settings.hook_token)
+        })
+    }
+
+    fn sync_hooks_item(&mut self) {
+        let on = self.hooks_installed();
+        if let Some(t) = &mut self.tray {
+            t.set_hooks_installed(on);
+        }
+    }
+
+    fn showing_needs_you(&self) -> bool {
+        self.playing
+            .as_ref()
+            .is_some_and(|p| p.kind == Kind::NeedsYou && p.exit.is_none())
+    }
+
+    fn react(&mut self, reaction: Reaction) {
+        log::info!("pending: {} -> {reaction:?}", self.pending.summary());
+        match reaction {
+            Reaction::Nothing => {}
+            Reaction::NeedsYou => {
+                if !self.showing_needs_you() {
+                    self.queued = None;
+                    self.play(Kind::NeedsYou, false);
+                }
+            }
+            Reaction::Done => {
+                if self
+                    .playing
+                    .as_ref()
+                    .is_some_and(|p| p.kind == Kind::NeedsYou)
+                {
+                    self.stop();
+                    self.queued = Some(Kind::Done);
+                } else {
+                    self.play(Kind::Done, false);
+                }
+            }
+            Reaction::StopNeedsYou => {
+                if self.showing_needs_you() {
+                    self.stop();
+                }
+            }
+        }
+        if let Some(t) = &mut self.tray {
+            t.set_pending(&self.pending.summary());
+        }
+    }
+
+    /// The current animation ended: play what is queued, or go back to
+    /// Needs you if something still waits.
+    fn finished(&mut self) {
+        self.playing = None;
+        if let Some(kind) = self.queued.take() {
+            self.play(kind, false);
+        } else if self.pending.needs_you() > 0 {
+            self.play(Kind::NeedsYou, false);
+        }
     }
 
     fn reschedule(&mut self) {
@@ -197,7 +275,6 @@ impl App {
     }
 
     /// Slide a looping animation away.
-    #[allow(dead_code)] // used once Claude Code hooks report state
     fn stop(&mut self) {
         let now = Instant::now();
         if let Some(t) = self.playhead(now)
@@ -285,6 +362,33 @@ impl App {
                 if let Some(path) = &self.settings_path {
                     open_in_editor(path);
                 }
+            }
+            Command::ClearPending => {
+                let r = self.pending.clear_all();
+                self.react(r);
+            }
+            Command::ToggleHooks => {
+                let install = !self.hooks_installed();
+                let result = hooks::claude_settings_path()
+                    .ok_or_else(|| anyhow::anyhow!("no home folder"))
+                    .and_then(|path| {
+                        hooks::update_settings_file(
+                            &path,
+                            install,
+                            self.settings.hook_port,
+                            &self.settings.hook_token,
+                        )
+                        .map(|_| path)
+                    });
+                match result {
+                    Ok(path) => log::info!(
+                        "{} Claude Code hooks in {}",
+                        if install { "installed" } else { "removed" },
+                        path.display()
+                    ),
+                    Err(e) => log::error!("Claude Code hooks: {e:#}"),
+                }
+                self.sync_hooks_item();
             }
             Command::Quit => {
                 self.save();
@@ -390,6 +494,7 @@ impl ApplicationHandler<UserEvent> for App {
             Ok(t) => self.tray = Some(t),
             Err(e) => log::error!("tray: {e:#}"),
         }
+        self.sync_hooks_item();
 
         self.render();
         self.apply_mode();
@@ -403,6 +508,11 @@ impl ApplicationHandler<UserEvent> for App {
                 .as_ref()
                 .filter(|t| t.is_toggle_hotkey(id))
                 .map(|_| Command::ToggleOff),
+            UserEvent::Hook(e) => {
+                let r = self.pending.apply(e, Instant::now());
+                self.react(r);
+                None
+            }
         };
         if let Some(cmd) = cmd {
             self.handle(cmd, event_loop);
@@ -431,7 +541,7 @@ impl ApplicationHandler<UserEvent> for App {
                     self.stop();
                 }
                 if self.playing.is_some() && self.playhead(now).is_none() {
-                    self.playing = None;
+                    self.finished();
                 }
                 self.render();
                 if self.playing.is_some() {
@@ -443,6 +553,16 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let timeout = self.settings.done_timeout();
+        if self.pending.expire(Instant::now(), timeout)
+            && let Some(t) = &mut self.tray
+        {
+            t.set_pending(&self.pending.summary());
+        }
+        let wake = match self.pending.next_expiry(timeout) {
+            Some(e) => e.min(self.next_peek),
+            None => self.next_peek,
+        };
         if self.settings.mode == Mode::On
             && self.playing.is_none()
             && Instant::now() >= self.next_peek
@@ -453,9 +573,12 @@ impl ApplicationHandler<UserEvent> for App {
             // Redraws are paced by vsync while the cube moves.
             event_loop.set_control_flow(ControlFlow::Wait);
         } else if self.settings.mode == Mode::On {
-            event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_peek));
+            event_loop.set_control_flow(ControlFlow::WaitUntil(wake));
         } else {
-            event_loop.set_control_flow(ControlFlow::Wait);
+            match self.pending.next_expiry(timeout) {
+                Some(e) => event_loop.set_control_flow(ControlFlow::WaitUntil(e)),
+                None => event_loop.set_control_flow(ControlFlow::Wait),
+            }
         }
     }
 }

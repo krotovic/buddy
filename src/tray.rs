@@ -21,6 +21,10 @@ pub enum Command {
     SetEdge(Edge),
     SetColor(FrameColor),
     OpenSettingsFile,
+    /// Forget all pending Claude Code items.
+    ClearPending,
+    /// Add Buddy's hooks to Claude Code, or remove them.
+    ToggleHooks,
     Quit,
 }
 
@@ -59,6 +63,8 @@ pub fn parse_menu_id(id: &str) -> Option<Command> {
             Command::SetColor(serde_json::from_value(serde_json::Value::String(value.into())).ok()?)
         }
         "open-settings" => Command::OpenSettingsFile,
+        "clear-pending" => Command::ClearPending,
+        "hooks" => Command::ToggleHooks,
         "quit" => Command::Quit,
         _ => return None,
     })
@@ -105,6 +111,8 @@ mod real {
     pub struct Tray {
         icon: TrayIcon,
         checks: Vec<CheckMenuItem>,
+        pending: MenuItem,
+        hooks: CheckMenuItem,
         _hotkeys: Option<(GlobalHotKeyManager, HotKey)>,
         hotkey_id: Option<u32>,
     }
@@ -129,6 +137,15 @@ mod real {
                 item
             };
 
+            let pending = MenuItem::with_id("pending", "Nothing pending", false, None);
+            menu.append(&pending)?;
+            menu.append(&MenuItem::with_id(
+                "clear-pending",
+                "Clear pending",
+                true,
+                None,
+            ))?;
+            menu.append(&PredefinedMenuItem::separator())?;
             menu.append(&check(mode_id(Mode::On), "On"))?;
             menu.append(&check(mode_id(Mode::Calm), "Calm"))?;
             menu.append(&check(mode_id(Mode::Off), "Off"))?;
@@ -174,6 +191,10 @@ mod real {
             menu.append(&colour)?;
 
             menu.append(&PredefinedMenuItem::separator())?;
+            // Not in `checks`: its state comes from the Claude Code
+            // settings file, not from ours.
+            let hooks = CheckMenuItem::with_id("hooks", "Claude Code hooks", true, false, None);
+            menu.append(&hooks)?;
             menu.append(&MenuItem::with_id(
                 "open-settings",
                 "Open settings file",
@@ -205,6 +226,8 @@ mod real {
             let mut tray = Self {
                 icon,
                 checks,
+                pending,
+                hooks,
                 _hotkeys: hotkeys,
                 hotkey_id,
             };
@@ -232,6 +255,14 @@ mod real {
 
         pub fn is_toggle_hotkey(&self, id: u32) -> bool {
             self.hotkey_id == Some(id)
+        }
+
+        pub fn set_pending(&mut self, summary: &str) {
+            self.pending.set_text(summary);
+        }
+
+        pub fn set_hooks_installed(&mut self, on: bool) {
+            self.hooks.set_checked(on);
         }
     }
 
@@ -279,6 +310,8 @@ mod stub {
         pub fn is_toggle_hotkey(&self, _: u32) -> bool {
             false
         }
+        pub fn set_pending(&mut self, _: &str) {}
+        pub fn set_hooks_installed(&mut self, _: bool) {}
     }
 }
 
@@ -321,6 +354,8 @@ mod tests {
             );
         }
         assert_eq!(parse_menu_id("quit"), Some(Command::Quit));
+        assert_eq!(parse_menu_id("hooks"), Some(Command::ToggleHooks));
+        assert_eq!(parse_menu_id("clear-pending"), Some(Command::ClearPending));
         assert_eq!(parse_menu_id("nonsense:1"), None);
         assert_eq!(parse_menu_id("size:big"), None);
     }

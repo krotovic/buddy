@@ -24,6 +24,7 @@ pub const CUBE_SIZE_MIN: u32 = 120;
 pub const CUBE_SIZE_MAX: u32 = 480;
 pub const IDLE_INTERVAL_MIN_SECS: u64 = 30;
 pub const IDLE_INTERVAL_MAX_SECS: u64 = 10 * 60;
+pub const DEFAULT_HOOK_PORT: u16 = 47821;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -39,6 +40,13 @@ pub struct Settings {
     pub edge: Edge,
     /// Global shortcut that toggles Off, in global-hotkey syntax.
     pub toggle_shortcut: String,
+    /// Minutes until a Done item clears itself (1–60); 0 means never.
+    pub done_timeout_mins: u64,
+    /// Port of the local server Claude Code hooks post to (127.0.0.1).
+    pub hook_port: u16,
+    /// Secret the hooks send, so other programs cannot post fake events.
+    /// Generated on first start.
+    pub hook_token: String,
 }
 
 impl Default for Settings {
@@ -50,6 +58,9 @@ impl Default for Settings {
             idle_interval_secs: 5 * 60,
             edge: Edge::Bottom,
             toggle_shortcut: "CmdOrCtrl+Alt+C".to_string(),
+            done_timeout_mins: 10,
+            hook_port: DEFAULT_HOOK_PORT,
+            hook_token: String::new(),
         }
     }
 }
@@ -61,7 +72,19 @@ impl Settings {
         self.idle_interval_secs = self
             .idle_interval_secs
             .clamp(IDLE_INTERVAL_MIN_SECS, IDLE_INTERVAL_MAX_SECS);
+        if self.done_timeout_mins != 0 {
+            self.done_timeout_mins = self.done_timeout_mins.clamp(1, 60);
+        }
+        if self.hook_port < 1024 {
+            self.hook_port = DEFAULT_HOOK_PORT;
+        }
         self
+    }
+
+    /// How long a Done item stays pending; None means until you clear it.
+    pub fn done_timeout(&self) -> Option<std::time::Duration> {
+        (self.done_timeout_mins > 0)
+            .then(|| std::time::Duration::from_secs(self.done_timeout_mins * 60))
     }
 
     pub fn from_json(json: &str) -> anyhow::Result<Self> {
@@ -126,6 +149,9 @@ mod tests {
             idle_interval_secs: 120,
             edge: Edge::Left,
             toggle_shortcut: "Ctrl+Shift+B".into(),
+            done_timeout_mins: 0,
+            hook_port: 50000,
+            hook_token: "abc".into(),
         };
         assert_eq!(Settings::from_json(&s.to_json()).unwrap(), s);
     }
@@ -144,9 +170,15 @@ mod tests {
 
     #[test]
     fn out_of_range_values_are_clamped() {
-        let s = Settings::from_json(r#"{"cube_size":5000,"idle_interval_secs":1}"#).unwrap();
+        let s = Settings::from_json(
+            r#"{"cube_size":5000,"idle_interval_secs":1,"done_timeout_mins":500,"hook_port":80}"#,
+        )
+        .unwrap();
         assert_eq!(s.cube_size, CUBE_SIZE_MAX);
         assert_eq!(s.idle_interval_secs, IDLE_INTERVAL_MIN_SECS);
+        assert_eq!(s.done_timeout_mins, 60);
+        assert_eq!(s.hook_port, DEFAULT_HOOK_PORT);
+        assert_eq!(Settings::default().done_timeout().unwrap().as_secs(), 600);
     }
 
     #[test]

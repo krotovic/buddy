@@ -50,10 +50,11 @@ pub enum TimeOfDay {
 }
 
 impl TimeOfDay {
-    /// Midday is 11:00–15:00 as in the Figma file; morning runs from 04:00.
+    /// As in the plan: morning before 11:00, midday 11:00 to 15:00,
+    /// evening after 15:00.
     pub fn from_hour(hour: u32) -> Self {
         match hour {
-            4..=10 => TimeOfDay::Morning,
+            0..=10 => TimeOfDay::Morning,
             11..=14 => TimeOfDay::Midday,
             _ => TimeOfDay::Evening,
         }
@@ -358,8 +359,8 @@ mod tests {
 
     #[test]
     fn time_of_day_boundaries() {
-        assert_eq!(TimeOfDay::from_hour(3), TimeOfDay::Evening);
-        assert_eq!(TimeOfDay::from_hour(4), TimeOfDay::Morning);
+        assert_eq!(TimeOfDay::from_hour(3), TimeOfDay::Morning);
+        assert_eq!(TimeOfDay::from_hour(10), TimeOfDay::Morning);
         assert_eq!(TimeOfDay::from_hour(11), TimeOfDay::Midday);
         assert_eq!(TimeOfDay::from_hour(15), TimeOfDay::Evening);
     }
