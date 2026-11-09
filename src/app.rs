@@ -13,6 +13,7 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::window::{Window, WindowAttributes, WindowId, WindowLevel};
 
+use crate::cursor;
 use crate::focus;
 use crate::geometry::{self, Edge, Rect};
 use crate::gpu::{Gpu, WindowSurface};
@@ -51,6 +52,9 @@ pub struct App {
     pending: Pending,
     /// Animation to play once the current one has slid away.
     queued: Option<Kind>,
+    /// What the last frame drew, in window pixels, for clicks.
+    hit: Option<vello::kurbo::Rect>,
+    click: cursor::ClickEdge,
     home: Option<PathBuf>,
     /// An app on the quiet list is in front.
     quiet: bool,
@@ -112,6 +116,8 @@ impl App {
             rng: seed,
             pending: Pending::default(),
             queued: None,
+            hit: None,
+            click: cursor::ClickEdge::default(),
             home,
             quiet: false,
             next_focus_check: Instant::now(),
@@ -229,6 +235,28 @@ impl App {
             }
         } else if self.playing.is_none() && self.pending.needs_you() > 0 {
             self.play(Kind::NeedsYou, false);
+        }
+    }
+
+    /// A click on the cube clears everything pending and sends it away,
+    /// even while you are typing the answer elsewhere. Polled every frame
+    /// while the cube is out; the window itself stays click-through.
+    fn poll_click(&mut self) {
+        let Some(window) = &self.window else { return };
+        let Some((x, y, down)) = cursor::global(window.scale_factor()) else {
+            return;
+        };
+        let clicked = self.click.pressed(down);
+        let (Some(hit), Ok(origin)) = (self.hit, window.inner_position()) else {
+            return;
+        };
+        let local = vello::kurbo::Point::new(x - origin.x as f64, y - origin.y as f64);
+        if clicked && hit.contains(local) {
+            log::info!("cube clicked");
+            let r = self.pending.clear_all();
+            self.react(r);
+            self.queued = None;
+            self.stop();
         }
     }
 
@@ -459,6 +487,7 @@ impl App {
             return;
         };
         self.scene.reset();
+        let mut hit = None;
         if let (Some(p), Some((t, exit))) = (&self.playing, head)
             && let Some(anim) = self.library.get(p.kind, p.time, p.edge)
         {
@@ -477,7 +506,9 @@ impl App {
             };
             let view = Affine::translate((x, y)) * Affine::scale(s);
             self.library.draw(&mut self.scene, anim, t, exit, view);
+            hit = self.library.visible_bounds(anim, t, exit, view);
         }
+        self.hit = hit;
         if let Err(e) = self.gpu.render(surface, &self.scene) {
             log::error!("render: {e}");
         }
@@ -594,6 +625,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.request_redraw();
             }
             WindowEvent::RedrawRequested => {
+                self.poll_click();
                 let now = Instant::now();
                 if let Some(p) = &self.playing
                     && p.exit.is_none()

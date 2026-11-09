@@ -220,6 +220,30 @@ impl Library {
         Rect::new(b.x0.floor(), b.y0.floor(), b.x1.ceil(), b.y1.ceil())
     }
 
+    /// Bounds of everything visible in `anim` at `t`, through `view`
+    /// (window pixels). Used to tell whether a click hit the cube.
+    pub fn visible_bounds(
+        &self,
+        anim: &Animation,
+        t: f32,
+        exit: Option<Exit>,
+        view: Affine,
+    ) -> Option<Rect> {
+        let pose = anim.timeline.pose_with(t, exit);
+        let mut bounds: Option<Rect> = None;
+        for (j, part) in anim.parts.iter().enumerate() {
+            let (Some(p), true) = (part, pose.alpha[j] > 0.002) else {
+                continue;
+            };
+            let node = &anim.timeline.nodes[j];
+            let (w, h) = self.parts[*p].size;
+            let m = view * pose.transform[j] * Affine::translate((node.x, node.y));
+            let r = m.transform_rect_bbox(Rect::new(0.0, 0.0, w, h));
+            bounds = Some(bounds.map_or(r, |b| b.union(r)));
+        }
+        bounds
+    }
+
     /// Draw `anim` posed at `t` seconds. `view` maps frame units to window
     /// pixels.
     pub fn draw(

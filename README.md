@@ -46,6 +46,11 @@ your other hooks, with a backup next to it as `settings.json.buddy-backup`):
 | Stop | Done: peeks, waves, winks and hides |
 | UserPromptSubmit, SessionEnd | Clears that session |
 
+Click the cube to clear everything pending and send it away, even while
+you are still typing the answer somewhere else. The window stays
+click-through: the click is noticed by watching the mouse, still reaches
+the app underneath, and no app loses keyboard focus.
+
 Items are tracked per session and merged: Needs you wins over Done, a new
 Done while something needs you only changes the count, and Done items clear
 themselves after `done_timeout_mins` (default 10, 0 = never). The hooks post
