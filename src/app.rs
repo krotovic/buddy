@@ -13,6 +13,7 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::window::{Window, WindowAttributes, WindowId, WindowLevel};
 
+use crate::focus;
 use crate::geometry::{self, Edge, Rect};
 use crate::gpu::{Gpu, WindowSurface};
 use crate::hooks;
@@ -50,7 +51,16 @@ pub struct App {
     pending: Pending,
     /// Animation to play once the current one has slid away.
     queued: Option<Kind>,
+    home: Option<PathBuf>,
+    /// An app on the quiet list is in front.
+    quiet: bool,
+    next_focus_check: Instant,
+    /// Claude Code config folders the tray offers hooks for.
+    claude_dirs: Vec<PathBuf>,
 }
+
+/// How often to check which app is in front.
+const FOCUS_CHECK: Duration = Duration::from_millis(750);
 
 /// Seconds the cube takes to slide away when a looping animation stops.
 const EXIT_SECS: f32 = 0.5;
@@ -71,6 +81,11 @@ struct Playing {
 impl App {
     pub fn new(settings: Settings, settings_path: Option<PathBuf>) -> anyhow::Result<Self> {
         let library = Library::load(settings.frame_color)?;
+        let home = directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf());
+        let claude_dirs = home
+            .as_deref()
+            .map(|h| hooks::claude_dirs(h, &settings.claude_config_dirs))
+            .unwrap_or_default();
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
@@ -97,6 +112,10 @@ impl App {
             rng: seed,
             pending: Pending::default(),
             queued: None,
+            home,
+            quiet: false,
+            next_focus_check: Instant::now(),
+            claude_dirs,
         })
     }
 
@@ -172,16 +191,44 @@ impl App {
         self.request_redraw();
     }
 
-    fn hooks_installed(&self) -> bool {
-        hooks::claude_settings_path().is_some_and(|p| {
-            hooks::installed(&p, self.settings.hook_port, &self.settings.hook_token)
-        })
+    fn hooks_installed(&self, dir: &std::path::Path) -> bool {
+        hooks::installed(
+            &dir.join("settings.json"),
+            self.settings.hook_port,
+            &self.settings.hook_token,
+        )
     }
 
-    fn sync_hooks_item(&mut self) {
-        let on = self.hooks_installed();
+    fn sync_hooks_items(&mut self) {
+        let states: Vec<bool> = self
+            .claude_dirs
+            .iter()
+            .map(|d| self.hooks_installed(d))
+            .collect();
         if let Some(t) = &mut self.tray {
-            t.set_hooks_installed(on);
+            for (i, on) in states.into_iter().enumerate() {
+                t.set_hooks_installed(i, on);
+            }
+        }
+    }
+
+    /// An app on the quiet list (the Claude app) came to the front or
+    /// left it. In front: whatever plays slides away and nothing new
+    /// starts. Gone: Needs you comes back if something still waits.
+    fn set_quiet(&mut self, quiet: bool) {
+        if quiet == self.quiet {
+            return;
+        }
+        self.quiet = quiet;
+        log::info!("quiet app in front: {quiet}");
+        if quiet {
+            self.queued = None;
+            if self.playing.is_some() {
+                self.stop();
+                self.request_redraw();
+            }
+        } else if self.playing.is_none() && self.pending.needs_you() > 0 {
+            self.play(Kind::NeedsYou, false);
         }
     }
 
@@ -244,7 +291,7 @@ impl App {
     /// of day. A looping kind (Needs you) keeps going until `stop`, or
     /// for one loop when `preview` is set.
     fn play(&mut self, kind: Kind, preview: bool) {
-        if self.settings.mode == Mode::Off {
+        if self.settings.mode == Mode::Off || (self.quiet && !preview) {
             return;
         }
         use chrono::Timelike;
@@ -372,28 +419,27 @@ impl App {
                 let r = self.pending.clear_all();
                 self.react(r);
             }
-            Command::ToggleHooks => {
-                let install = !self.hooks_installed();
-                let result = hooks::claude_settings_path()
-                    .ok_or_else(|| anyhow::anyhow!("no home folder"))
-                    .and_then(|path| {
-                        hooks::update_settings_file(
-                            &path,
-                            install,
-                            self.settings.hook_port,
-                            &self.settings.hook_token,
-                        )
-                        .map(|_| path)
-                    });
+            Command::ToggleHooks(index) => {
+                let Some(dir) = self.claude_dirs.get(index).cloned() else {
+                    return;
+                };
+                let install = !self.hooks_installed(&dir);
+                let path = dir.join("settings.json");
+                let result = hooks::update_settings_file(
+                    &path,
+                    install,
+                    self.settings.hook_port,
+                    &self.settings.hook_token,
+                );
                 match result {
-                    Ok(path) => log::info!(
+                    Ok(()) => log::info!(
                         "{} Claude Code hooks in {}",
                         if install { "installed" } else { "removed" },
                         path.display()
                     ),
                     Err(e) => log::error!("Claude Code hooks: {e:#}"),
                 }
-                self.sync_hooks_item();
+                self.sync_hooks_items();
             }
             Command::Quit => {
                 self.save();
@@ -495,11 +541,19 @@ impl ApplicationHandler<UserEvent> for App {
         }
         self.place_window();
 
-        match Tray::new(&self.settings) {
+        let labels: Vec<String> = self
+            .claude_dirs
+            .iter()
+            .map(|d| match &self.home {
+                Some(home) => hooks::dir_label(home, d),
+                None => d.display().to_string(),
+            })
+            .collect();
+        match Tray::new(&self.settings, &labels) {
             Ok(t) => self.tray = Some(t),
             Err(e) => log::error!("tray: {e:#}"),
         }
-        self.sync_hooks_item();
+        self.sync_hooks_items();
 
         self.render();
         // Keep the first peek a few seconds after start, so a fresh start
@@ -560,32 +614,42 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let now = Instant::now();
         let timeout = self.settings.done_timeout();
-        if self.pending.expire(Instant::now(), timeout)
+        if self.pending.expire(now, timeout)
             && let Some(t) = &mut self.tray
         {
             t.set_pending(&self.pending.summary());
         }
-        let wake = match self.pending.next_expiry(timeout) {
-            Some(e) => e.min(self.next_peek),
-            None => self.next_peek,
-        };
-        if self.settings.mode == Mode::On
-            && self.playing.is_none()
-            && Instant::now() >= self.next_peek
-        {
-            self.play(Kind::Idle, false);
+        if self.settings.mode != Mode::Off && now >= self.next_focus_check {
+            self.next_focus_check = now + FOCUS_CHECK;
+            let quiet =
+                focus::is_quiet(focus::frontmost_app().as_deref(), &self.settings.quiet_apps);
+            self.set_quiet(quiet);
+        }
+        if self.settings.mode == Mode::On && self.playing.is_none() && now >= self.next_peek {
+            if self.quiet {
+                // Skip this peek; the next one comes a full interval later.
+                self.reschedule();
+            } else {
+                self.play(Kind::Idle, false);
+            }
+        }
+        let mut wake = self.pending.next_expiry(timeout);
+        let mut wake_at = |t: Instant| wake = Some(wake.map_or(t, |w: Instant| w.min(t)));
+        if self.settings.mode == Mode::On {
+            wake_at(self.next_peek);
+        }
+        if self.settings.mode != Mode::Off {
+            wake_at(self.next_focus_check);
         }
         if self.playing.is_some() {
             // Redraws are paced by vsync while the cube moves.
             event_loop.set_control_flow(ControlFlow::Wait);
-        } else if self.settings.mode == Mode::On {
-            event_loop.set_control_flow(ControlFlow::WaitUntil(wake));
+        } else if let Some(at) = wake {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(at));
         } else {
-            match self.pending.next_expiry(timeout) {
-                Some(e) => event_loop.set_control_flow(ControlFlow::WaitUntil(e)),
-                None => event_loop.set_control_flow(ControlFlow::Wait),
-            }
+            event_loop.set_control_flow(ControlFlow::Wait);
         }
     }
 }

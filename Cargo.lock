@@ -271,6 +271,7 @@ dependencies = [
  "env_logger",
  "global-hotkey",
  "log",
+ "objc2-app-kit 0.3.2",
  "pollster",
  "resvg",
  "serde",

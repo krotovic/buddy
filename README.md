@@ -33,9 +33,12 @@ Settings are saved as JSON:
 
 ## Claude Code
 
-Tick **Claude Code hooks** in the tray menu once. It adds HTTP hooks to
-`~/.claude/settings.json` (keeping your other hooks, with a backup next to
-it as `settings.json.buddy-backup`):
+Under **Claude Code hooks** in the tray menu, tick each Claude Code config
+folder Buddy should listen to: `~/.claude` and every other `~/.claude*`
+folder (for example `~/.claude-work` for a second account used through
+`CLAUDE_CONFIG_DIR`); more can be listed in `claude_config_dirs` in the
+settings file. Ticking one adds HTTP hooks to its `settings.json` (keeping
+your other hooks, with a backup next to it as `settings.json.buddy-backup`):
 
 | Hook | Cube |
 | --- | --- |
@@ -48,6 +51,11 @@ Done while something needs you only changes the count, and Done items clear
 themselves after `done_timeout_mins` (default 10, 0 = never). The hooks post
 to `http://127.0.0.1:47821/buddy/hook` with a token from Buddy's settings
 file; when Buddy is not running they fail fast and Claude Code carries on.
+
+While an app on the `quiet_apps` list is in front (the Claude app by
+default: `com.anthropic.claudefordesktop` on macOS, `Claude.exe` on
+Windows), the cube slides away and stays still. Pending items keep
+counting; anything that still needs you comes back when you switch away.
 
 ## Assets
 

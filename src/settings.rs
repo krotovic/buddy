@@ -47,6 +47,12 @@ pub struct Settings {
     /// Secret the hooks send, so other programs cannot post fake events.
     /// Generated on first start.
     pub hook_token: String,
+    /// Claude Code config folders to offer hooks for, besides `~/.claude`
+    /// and the other `~/.claude*` folders, which are found on their own.
+    pub claude_config_dirs: Vec<String>,
+    /// Apps that keep the cube still while they are in front: macOS bundle
+    /// ids or Windows executable names.
+    pub quiet_apps: Vec<String>,
 }
 
 impl Default for Settings {
@@ -61,6 +67,8 @@ impl Default for Settings {
             done_timeout_mins: 10,
             hook_port: DEFAULT_HOOK_PORT,
             hook_token: String::new(),
+            claude_config_dirs: Vec::new(),
+            quiet_apps: vec!["com.anthropic.claudefordesktop".into(), "Claude.exe".into()],
         }
     }
 }
@@ -152,6 +160,8 @@ mod tests {
             done_timeout_mins: 0,
             hook_port: 50000,
             hook_token: "abc".into(),
+            claude_config_dirs: vec!["~/.claude-x".into()],
+            quiet_apps: vec![],
         };
         assert_eq!(Settings::from_json(&s.to_json()).unwrap(), s);
     }

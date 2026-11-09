@@ -147,9 +147,44 @@ const HOOKS: [(&str, Option<&str>); 4] = [
     ("SessionEnd", None),
 ];
 
-/// `~/.claude/settings.json`, the user-level Claude Code settings.
-pub fn claude_settings_path() -> Option<std::path::PathBuf> {
-    directories::BaseDirs::new().map(|d| d.home_dir().join(".claude").join("settings.json"))
+/// Claude Code config folders to offer hooks for: `~/.claude`, every other
+/// `~/.claude*` folder (for example `~/.claude-work`, used through
+/// `CLAUDE_CONFIG_DIR` for a second account), and `extra` from the
+/// settings (`~/` is expanded). `~/.claude` comes first.
+pub fn claude_dirs(home: &std::path::Path, extra: &[String]) -> Vec<std::path::PathBuf> {
+    let mut dirs = vec![home.join(".claude")];
+    if let Ok(entries) = std::fs::read_dir(home) {
+        let mut found: Vec<_> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with(".claude") && n != ".claude")
+            })
+            .collect();
+        found.sort();
+        dirs.extend(found);
+    }
+    for e in extra {
+        let p = match e.strip_prefix("~/") {
+            Some(rest) => home.join(rest),
+            None => std::path::PathBuf::from(e),
+        };
+        if !dirs.contains(&p) {
+            dirs.push(p);
+        }
+    }
+    dirs
+}
+
+/// How a config folder is shown in the menu: `~/.claude-work`.
+pub fn dir_label(home: &std::path::Path, dir: &std::path::Path) -> String {
+    match dir.strip_prefix(home) {
+        Ok(rest) => format!("~/{}", rest.display()),
+        Err(_) => dir.display().to_string(),
+    }
 }
 
 fn is_ours(handler: &serde_json::Value) -> bool {
@@ -411,5 +446,26 @@ mod tests {
         assert!(update_settings_file(&path, true, 1, "t").is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ oops");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn finds_every_claude_config_folder() {
+        let home = std::env::temp_dir().join(format!("buddy-home-{}", std::process::id()));
+        for d in [".claude-work", ".claude-personal", ".config", "other"] {
+            std::fs::create_dir_all(home.join(d)).unwrap();
+        }
+        std::fs::write(home.join(".claude.json"), "{}").unwrap();
+        let dirs = claude_dirs(&home, &["~/x/.claude-ci".into(), "~/.claude-work".into()]);
+        let labels: Vec<_> = dirs.iter().map(|d| dir_label(&home, d)).collect();
+        assert_eq!(
+            labels,
+            [
+                "~/.claude",
+                "~/.claude-personal",
+                "~/.claude-work",
+                "~/x/.claude-ci"
+            ]
+        );
+        std::fs::remove_dir_all(&home).unwrap();
     }
 }

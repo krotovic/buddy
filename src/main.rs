@@ -6,6 +6,7 @@
 
 mod app;
 mod cube;
+mod focus;
 mod geometry;
 mod gpu;
 mod hooks;

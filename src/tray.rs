@@ -23,8 +23,9 @@ pub enum Command {
     OpenSettingsFile,
     /// Forget all pending Claude Code items.
     ClearPending,
-    /// Add Buddy's hooks to Claude Code, or remove them.
-    ToggleHooks,
+    /// Add Buddy's hooks to one Claude Code config folder (index into the
+    /// folder list), or remove them.
+    ToggleHooks(usize),
     Quit,
 }
 
@@ -64,7 +65,7 @@ pub fn parse_menu_id(id: &str) -> Option<Command> {
         }
         "open-settings" => Command::OpenSettingsFile,
         "clear-pending" => Command::ClearPending,
-        "hooks" => Command::ToggleHooks,
+        "hooks" => Command::ToggleHooks(value.parse().ok()?),
         "quit" => Command::Quit,
         _ => return None,
     })
@@ -112,7 +113,7 @@ mod real {
         icon: TrayIcon,
         checks: Vec<CheckMenuItem>,
         pending: MenuItem,
-        hooks: CheckMenuItem,
+        hooks: Vec<CheckMenuItem>,
         _hotkeys: Option<(GlobalHotKeyManager, HotKey)>,
         hotkey_id: Option<u32>,
     }
@@ -128,7 +129,7 @@ mod real {
 
     impl Tray {
         /// Must be called on the main thread once the event loop runs.
-        pub fn new(settings: &Settings) -> anyhow::Result<Self> {
+        pub fn new(settings: &Settings, claude_dirs: &[String]) -> anyhow::Result<Self> {
             let menu = Menu::new();
             let mut checks = Vec::new();
             let mut check = |id: String, label: &str| {
@@ -191,10 +192,16 @@ mod real {
             menu.append(&colour)?;
 
             menu.append(&PredefinedMenuItem::separator())?;
-            // Not in `checks`: its state comes from the Claude Code
-            // settings file, not from ours.
-            let hooks = CheckMenuItem::with_id("hooks", "Claude Code hooks", true, false, None);
-            menu.append(&hooks)?;
+            // Not in `checks`: their state comes from the Claude Code
+            // settings files, not from ours.
+            let hooks_menu = Submenu::new("Claude Code hooks", true);
+            let mut hooks = Vec::new();
+            for (i, label) in claude_dirs.iter().enumerate() {
+                let item = CheckMenuItem::with_id(format!("hooks:{i}"), label, true, false, None);
+                hooks_menu.append(&item)?;
+                hooks.push(item);
+            }
+            menu.append(&hooks_menu)?;
             menu.append(&MenuItem::with_id(
                 "open-settings",
                 "Open settings file",
@@ -261,8 +268,10 @@ mod real {
             self.pending.set_text(summary);
         }
 
-        pub fn set_hooks_installed(&mut self, on: bool) {
-            self.hooks.set_checked(on);
+        pub fn set_hooks_installed(&mut self, index: usize, on: bool) {
+            if let Some(item) = self.hooks.get(index) {
+                item.set_checked(on);
+            }
         }
     }
 
@@ -301,7 +310,7 @@ mod stub {
     pub struct Tray;
 
     impl Tray {
-        pub fn new(_: &Settings) -> anyhow::Result<Self> {
+        pub fn new(_: &Settings, _: &[String]) -> anyhow::Result<Self> {
             log::warn!("no tray icon on this platform");
             Ok(Tray)
         }
@@ -311,7 +320,7 @@ mod stub {
             false
         }
         pub fn set_pending(&mut self, _: &str) {}
-        pub fn set_hooks_installed(&mut self, _: bool) {}
+        pub fn set_hooks_installed(&mut self, _: usize, _: bool) {}
     }
 }
 
@@ -354,7 +363,8 @@ mod tests {
             );
         }
         assert_eq!(parse_menu_id("quit"), Some(Command::Quit));
-        assert_eq!(parse_menu_id("hooks"), Some(Command::ToggleHooks));
+        assert_eq!(parse_menu_id("hooks:2"), Some(Command::ToggleHooks(2)));
+        assert_eq!(parse_menu_id("hooks"), None);
         assert_eq!(parse_menu_id("clear-pending"), Some(Command::ClearPending));
         assert_eq!(parse_menu_id("nonsense:1"), None);
         assert_eq!(parse_menu_id("size:big"), None);
