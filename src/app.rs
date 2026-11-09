@@ -153,6 +153,11 @@ impl App {
     }
 
     fn apply_mode(&mut self) {
+        self.apply_mode_keeping_schedule();
+        self.reschedule();
+    }
+
+    fn apply_mode_keeping_schedule(&mut self) {
         if let Some(window) = &self.window {
             window.set_visible(self.settings.mode != Mode::Off);
         }
@@ -164,7 +169,6 @@ impl App {
             // important one.
             self.play(Kind::NeedsYou, false);
         }
-        self.reschedule();
         self.request_redraw();
     }
 
@@ -233,6 +237,7 @@ impl App {
 
     fn reschedule(&mut self) {
         self.next_peek = Instant::now() + Duration::from_secs(self.settings.idle_interval_secs);
+        log::debug!("next idle peek in {} s", self.settings.idle_interval_secs);
     }
 
     /// Play `kind` from the configured edge, in the variant for the time
@@ -497,7 +502,9 @@ impl ApplicationHandler<UserEvent> for App {
         self.sync_hooks_item();
 
         self.render();
-        self.apply_mode();
+        // Keep the first peek a few seconds after start, so a fresh start
+        // shows the cube straight away.
+        self.apply_mode_keeping_schedule();
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
