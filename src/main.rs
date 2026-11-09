@@ -8,11 +8,12 @@ mod app;
 mod cube;
 mod geometry;
 mod gpu;
+mod library;
 mod palette;
-mod peek;
 #[cfg(target_os = "windows")]
 mod platform_windows;
 mod settings;
+mod timeline;
 mod tray;
 
 use winit::event_loop::EventLoop;

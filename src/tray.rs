@@ -4,6 +4,7 @@
 //! can be developed and tested anywhere.
 
 use crate::geometry::Edge;
+use crate::library::Kind;
 use crate::palette::FrameColor;
 use crate::settings::{Mode, Settings};
 
@@ -13,6 +14,8 @@ pub enum Command {
     SetMode(Mode),
     ToggleOff,
     PeekNow,
+    /// Play one animation now, to see it.
+    Preview(Kind),
     SetInterval(u64),
     SetSize(u32),
     SetEdge(Edge),
@@ -41,6 +44,12 @@ pub fn parse_menu_id(id: &str) -> Option<Command> {
             Command::SetMode(serde_json::from_value(serde_json::Value::String(value.into())).ok()?)
         }
         "peek" => Command::PeekNow,
+        "preview" => Command::Preview(match value {
+            "idle" => Kind::Idle,
+            "done" => Kind::Done,
+            "needs-you" => Kind::NeedsYou,
+            _ => return None,
+        }),
         "interval" => Command::SetInterval(value.parse().ok()?),
         "size" => Command::SetSize(value.parse().ok()?),
         "edge" => {
@@ -125,6 +134,20 @@ mod real {
             menu.append(&check(mode_id(Mode::Off), "Off"))?;
             menu.append(&PredefinedMenuItem::separator())?;
             menu.append(&MenuItem::with_id("peek", "Peek now", true, None))?;
+            let preview = Submenu::new("Preview", true);
+            for (kind, label) in [
+                (Kind::Idle, "Idle"),
+                (Kind::Done, "Done"),
+                (Kind::NeedsYou, "Needs you"),
+            ] {
+                preview.append(&MenuItem::with_id(
+                    format!("preview:{}", kind.slug()),
+                    label,
+                    true,
+                    None,
+                ))?;
+            }
+            menu.append(&preview)?;
 
             let interval = Submenu::new("Peek every", true);
             for (secs, label) in INTERVALS {
@@ -291,6 +314,12 @@ mod tests {
         );
         assert_eq!(parse_menu_id("size:300"), Some(Command::SetSize(300)));
         assert_eq!(parse_menu_id("peek"), Some(Command::PeekNow));
+        for kind in [Kind::Idle, Kind::Done, Kind::NeedsYou] {
+            assert_eq!(
+                parse_menu_id(&format!("preview:{}", kind.slug())),
+                Some(Command::Preview(kind))
+            );
+        }
         assert_eq!(parse_menu_id("quit"), Some(Command::Quit));
         assert_eq!(parse_menu_id("nonsense:1"), None);
         assert_eq!(parse_menu_id("size:big"), None);

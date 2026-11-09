@@ -1,8 +1,11 @@
-//! The cube artwork.
+//! The still idle cube, used for the tray icon.
 //!
-//! The SVG files in `assets/figma` are exported from the Figma design file
-//! and stay untouched. The frame colour is swapped in the SVG text before it
-//! is parsed, so one set of files covers all eight colours.
+//! The SVG in `assets/figma` is exported from the Figma design file and
+//! stays untouched. The frame colour is swapped in the SVG text before it
+//! is parsed, so one file covers all eight colours.
+
+// Only the tray (Windows and macOS) uses it.
+#![cfg_attr(not(any(target_os = "windows", target_os = "macos")), allow(dead_code))]
 
 use crate::palette::FrameColor;
 
@@ -13,10 +16,6 @@ const IDLE_SVG: &str = include_str!("../assets/figma/coral-idle.svg");
 const CORAL_LIGHT: &str = "#FF9E94";
 const CORAL_DARK: &str = "#EE6F6A";
 const CORAL_INSIDE: &str = "#FFF7F5";
-
-/// Size of the exported artboard, in SVG units.
-pub const ARTBOARD_W: f32 = 260.0;
-pub const ARTBOARD_H: f32 = 202.0;
 
 /// Bounds of the cube body (the frame) inside the artboard, in SVG units.
 pub const BODY_LEFT: f32 = 61.92;
@@ -37,12 +36,6 @@ pub fn idle_svg(color: FrameColor) -> String {
         .replace(CORAL_LIGHT, swatch.frame_light)
         .replace(CORAL_DARK, swatch.frame_dark)
         .replace(CORAL_INSIDE, swatch.inside)
-}
-
-/// Parse an SVG string into a usvg tree.
-pub fn parse(svg: &str) -> anyhow::Result<vello_svg::usvg::Tree> {
-    let opt = vello_svg::usvg::Options::default();
-    Ok(vello_svg::usvg::Tree::from_str(svg, &opt)?)
 }
 
 /// Rasterise the idle cube into straight (non-premultiplied) RGBA pixels,
@@ -77,9 +70,8 @@ mod tests {
     fn every_colour_parses() {
         for color in FrameColor::ALL {
             let svg = idle_svg(color);
-            let tree = parse(&svg).unwrap();
-            assert_eq!(tree.size().width(), ARTBOARD_W);
-            assert_eq!(tree.size().height(), ARTBOARD_H);
+            let tree = resvg::usvg::Tree::from_str(&svg, &Default::default()).unwrap();
+            assert_eq!(tree.size().width(), 260.0);
             assert!(svg.contains(color.swatch().frame_dark));
         }
     }

@@ -44,6 +44,9 @@ impl Gpu {
         }
     }
 
+    // `..Default::default()` in the adapter options is needed on some
+    // wgpu builds and redundant on others.
+    #[allow(clippy::needless_update)]
     pub fn create_surface(&mut self, window: Arc<Window>) -> anyhow::Result<WindowSurface> {
         let size = window.inner_size();
         let surface = self

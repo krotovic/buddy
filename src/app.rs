@@ -13,11 +13,11 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::window::{Window, WindowAttributes, WindowId, WindowLevel};
 
-use crate::cube;
-use crate::geometry::{self, Rect};
+use crate::geometry::{self, Edge, Rect};
 use crate::gpu::{Gpu, WindowSurface};
-use crate::peek;
+use crate::library::{Kind, Library, TimeOfDay};
 use crate::settings::{Mode, Settings};
+use crate::timeline::{self, Exit};
 use crate::tray::{self, Command, Tray};
 
 #[derive(Debug)]
@@ -35,20 +35,34 @@ pub struct App {
     window: Option<Arc<Window>>,
     surface: Option<WindowSurface>,
     tray: Option<Tray>,
-    tree: vello_svg::usvg::Tree,
+    library: Library,
     scene: Scene,
-    /// When the current peek started, if one is playing.
-    peek_started: Option<Instant>,
+    playing: Option<Playing>,
     next_peek: Instant,
     /// Position along the edge, 0.0–1.0; changes before every peek.
     along: f32,
     rng: u64,
-    reveal: f32,
+}
+
+/// Seconds the cube takes to slide away when a looping animation stops.
+const EXIT_SECS: f32 = 0.5;
+
+/// The animation on screen.
+struct Playing {
+    kind: Kind,
+    time: TimeOfDay,
+    edge: Edge,
+    started: Instant,
+    /// For looping animations: when to start sliding away on its own
+    /// (previews). Without it, the loop runs until `stop` is called.
+    stop_at: Option<Instant>,
+    /// Playhead frozen when the exit started, and when it started.
+    exit: Option<(f32, Instant)>,
 }
 
 impl App {
     pub fn new(settings: Settings, settings_path: Option<PathBuf>) -> anyhow::Result<Self> {
-        let tree = cube::parse(&cube::idle_svg(settings.frame_color))?;
+        let library = Library::load(settings.frame_color)?;
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
@@ -68,12 +82,11 @@ impl App {
             window: None,
             surface: None,
             tray: None,
-            tree,
+            library,
             scene: Scene::new(),
-            peek_started: None,
+            playing: None,
             along: 0.5,
             rng: seed,
-            reveal: 0.0,
         })
     }
 
@@ -118,7 +131,9 @@ impl App {
             return;
         };
         let Some(window) = &self.window else { return };
-        let size = geometry::window_size(self.settings.cube_size, scale);
+        let crop = self.library.crop(self.settings.edge);
+        let s = geometry::svg_scale(self.settings.cube_size, scale);
+        let size = geometry::window_size(crop.width(), crop.height(), s);
         let rect = geometry::window_rect(monitor, size, self.settings.edge, self.along);
         let _ = window.request_inner_size(PhysicalSize::new(rect.w, rect.h));
         window.set_outer_position(PhysicalPosition::new(rect.x, rect.y));
@@ -131,9 +146,8 @@ impl App {
         if let Some(window) = &self.window {
             window.set_visible(self.settings.mode != Mode::Off);
         }
-        if self.settings.mode != Mode::On {
-            self.peek_started = None;
-            self.reveal = 0.0;
+        if self.settings.mode == Mode::Off {
+            self.playing = None;
         }
         self.reschedule();
         self.request_redraw();
@@ -143,17 +157,75 @@ impl App {
         self.next_peek = Instant::now() + Duration::from_secs(self.settings.idle_interval_secs);
     }
 
-    fn start_peek(&mut self) {
-        if self.settings.mode != Mode::On {
+    /// Play `kind` from the configured edge, in the variant for the time
+    /// of day. A looping kind (Needs you) keeps going until `stop`, or
+    /// for one loop when `preview` is set.
+    fn play(&mut self, kind: Kind, preview: bool) {
+        if self.settings.mode == Mode::Off {
             return;
         }
+        use chrono::Timelike;
+        let time = TimeOfDay::from_hour(chrono::Local::now().hour());
+        let edge = self.settings.edge;
+        let Some(anim) = self.library.get(kind, time, edge) else {
+            log::error!("no animation for {kind:?} {time:?} {edge:?}");
+            return;
+        };
+        let now = Instant::now();
+        let stop_at = match (anim.loop_start, preview) {
+            (Some(ls), true) => {
+                let d = anim.timeline.duration;
+                Some(now + Duration::from_secs_f32(d + (d - ls)))
+            }
+            _ => None,
+        };
+        log::info!("playing {}", anim.timeline.name);
         // Each peek comes out at a new spot, so the movement covers more of
         // the panel.
         self.along = 0.1 + 0.8 * self.random();
         self.place_window();
-        self.peek_started = Some(Instant::now());
+        self.playing = Some(Playing {
+            kind,
+            time,
+            edge,
+            started: now,
+            stop_at,
+            exit: None,
+        });
         self.reschedule();
         self.request_redraw();
+    }
+
+    /// Slide a looping animation away.
+    #[allow(dead_code)] // used once Claude Code hooks report state
+    fn stop(&mut self) {
+        let now = Instant::now();
+        if let Some(t) = self.playhead(now)
+            && let Some(p) = &mut self.playing
+            && p.exit.is_none()
+        {
+            p.exit = Some((t.0, now));
+        }
+    }
+
+    /// Current time in the playing timeline and exit progress, or None
+    /// when nothing is playing or it has finished.
+    fn playhead(&self, now: Instant) -> Option<(f32, Option<Exit>)> {
+        let p = self.playing.as_ref()?;
+        let anim = self.library.get(p.kind, p.time, p.edge)?;
+        if let Some((frozen, since)) = p.exit {
+            let progress = (now - since).as_secs_f32() / EXIT_SECS;
+            return (progress < 1.0).then_some((frozen, Some(Exit { progress })));
+        }
+        let elapsed = (now - p.started).as_secs_f32();
+        let tl = &anim.timeline;
+        if anim.loop_start.is_none() && elapsed >= tl.duration {
+            return None;
+        }
+        Some((
+            timeline::playhead(elapsed, tl.duration, anim.loop_start),
+            None,
+        ))
     }
 
     fn request_redraw(&self) {
@@ -180,7 +252,8 @@ impl App {
                 };
                 self.apply_mode();
             }
-            Command::PeekNow => self.start_peek(),
+            Command::PeekNow => self.play(Kind::Idle, true),
+            Command::Preview(kind) => self.play(kind, true),
             Command::SetInterval(secs) => {
                 self.settings.idle_interval_secs = secs;
                 self.settings = self.settings.clone().sanitized();
@@ -195,13 +268,12 @@ impl App {
             Command::SetEdge(edge) => {
                 self.settings.edge = edge;
                 self.place_window();
-                self.start_peek();
+                self.play(Kind::Idle, true);
             }
             Command::SetColor(color) => {
                 self.settings.frame_color = color;
-                match cube::parse(&cube::idle_svg(color)) {
-                    Ok(tree) => self.tree = tree,
-                    Err(e) => log::error!("cube svg: {e}"),
+                if let Err(e) = self.library.set_color(color) {
+                    log::error!("recolouring: {e:#}");
                 }
                 if let Some(t) = &mut self.tray {
                     t.set_color(color);
@@ -227,17 +299,30 @@ impl App {
     }
 
     fn render(&mut self) {
+        let head = self.playhead(Instant::now());
         let (Some(window), Some(surface)) = (&self.window, &mut self.surface) else {
             return;
         };
-        let scale = geometry::svg_scale(self.settings.cube_size, window.scale_factor());
-        let (dx, dy) = geometry::cube_offset(self.settings.edge, self.reveal);
         self.scene.reset();
-        vello_svg::append_tree_with_transform(
-            &mut self.scene,
-            &self.tree,
-            Affine::scale(scale) * Affine::translate((dx as f64, dy as f64)),
-        );
+        if let (Some(p), Some((t, exit))) = (&self.playing, head)
+            && let Some(anim) = self.library.get(p.kind, p.time, p.edge)
+        {
+            let s = geometry::svg_scale(self.settings.cube_size, window.scale_factor());
+            let crop = self.library.crop(p.edge);
+            let size = window.inner_size();
+            // Pin the frame border that lies on the screen edge to the
+            // window border, so rounding never opens a gap there.
+            let x = match p.edge {
+                Edge::Right => size.width as f64 - crop.x1 * s,
+                _ => -crop.x0 * s,
+            };
+            let y = match p.edge {
+                Edge::Bottom => size.height as f64 - crop.y1 * s,
+                _ => -crop.y0 * s,
+            };
+            let view = Affine::translate((x, y)) * Affine::scale(s);
+            self.library.draw(&mut self.scene, anim, t, exit, view);
+        }
         if let Err(e) = self.gpu.render(surface, &self.scene) {
             log::error!("render: {e}");
         }
@@ -338,17 +423,18 @@ impl ApplicationHandler<UserEvent> for App {
                 self.request_redraw();
             }
             WindowEvent::RedrawRequested => {
-                if let Some(start) = self.peek_started {
-                    match peek::reveal_at(start.elapsed().as_secs_f32()) {
-                        Some(r) => self.reveal = r,
-                        None => {
-                            self.peek_started = None;
-                            self.reveal = 0.0;
-                        }
-                    }
+                let now = Instant::now();
+                if let Some(p) = &self.playing
+                    && p.exit.is_none()
+                    && p.stop_at.is_some_and(|at| now >= at)
+                {
+                    self.stop();
+                }
+                if self.playing.is_some() && self.playhead(now).is_none() {
+                    self.playing = None;
                 }
                 self.render();
-                if self.peek_started.is_some() {
+                if self.playing.is_some() {
                     self.request_redraw();
                 }
             }
@@ -358,12 +444,12 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if self.settings.mode == Mode::On
-            && self.peek_started.is_none()
+            && self.playing.is_none()
             && Instant::now() >= self.next_peek
         {
-            self.start_peek();
+            self.play(Kind::Idle, false);
         }
-        if self.peek_started.is_some() {
+        if self.playing.is_some() {
             // Redraws are paced by vsync while the cube moves.
             event_loop.set_control_flow(ControlFlow::Wait);
         } else if self.settings.mode == Mode::On {
